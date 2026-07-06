@@ -1,4 +1,8 @@
-# Iteration 1: just Flask and its database extension.
-# (Auth, deployment, and Postgres packages arrive in later iterations.)
+# Iteration 2: + PyJWT for token auth, pytest for the test suite.
+# (Deployment and Postgres packages arrive in iteration 3.)
 Flask==3.0.3
 Flask-SQLAlchemy==3.1.1
+PyJWT==2.10.1
+
+# --- dev/test only ---
+pytest==8.3.5

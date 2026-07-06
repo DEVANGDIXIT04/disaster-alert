@@ -2,20 +2,24 @@
 # -----------------------------------------------------------------------------
 # Crowdsourced Disaster Alert & Response Platform - Flask REST API.
 #
-# Iteration 1 (spiral model): the smallest thing that works.
-#   - GET  /api/health   -> liveness check
-#   - GET  /api/reports  -> list all incident reports
-#   - POST /api/reports  -> create a new incident report
-#   - GET  /            -> serves the Leaflet map page (static/index.html)
+# Spiral model progress:
+#   Iteration 1: reports + map (GET/POST /api/reports, static page).
+#   Iteration 2 (this one): users, JWT auth, category + severity.
+#     - POST /api/register  -> create account, get a token
+#     - POST /api/login     -> get a token
+#     - POST /api/reports   -> now requires a valid token
 #
 # Run locally:  pip install -r requirements.txt && python app.py
+# Run tests:    pytest
 # -----------------------------------------------------------------------------
 
 import os
 
 from flask import Flask, jsonify, request
+from werkzeug.security import check_password_hash, generate_password_hash
 
-from models import db, Report
+from auth import create_token, token_required
+from models import db, Report, User, CATEGORIES, SEVERITIES
 
 # --- App and database setup -------------------------------------------------
 
@@ -26,8 +30,11 @@ app = Flask(__name__, static_folder="static", static_url_path="")
 # Read the DB connection string from the environment. Locally there is no such
 # variable, so we fall back to SQLite - a zero-setup file database. In the
 # cloud we will set DATABASE_URL to a PostgreSQL address; the code is identical.
+# The SQLite file gets an absolute path next to this file, so it ends up in
+# the same place no matter which directory the app is started from.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
-    "DATABASE_URL", "sqlite:///local.db"
+    "DATABASE_URL", "sqlite:///" + os.path.join(BASE_DIR, "local.db")
 )
 
 db.init_app(app)
@@ -52,7 +59,7 @@ def add_cors_headers(response):
     return response
 
 
-# --- Routes -----------------------------------------------------------------
+# --- Basic routes -----------------------------------------------------------
 
 @app.route("/")
 def home():
@@ -66,17 +73,79 @@ def health():
     return jsonify({"status": "ok"})
 
 
+# --- Auth routes ------------------------------------------------------------
+
+@app.route("/api/register", methods=["POST"])
+def register():
+    """Create an account: {name, email, password, home_lat?, home_lng?}.
+
+    Returns 201 with a JWT so the user is logged in immediately.
+    """
+    data = request.get_json(silent=True)  # silent=True -> None instead of a crash on bad JSON
+    if data is None:
+        return jsonify({"error": "Request body must be JSON"}), 400
+
+    name = str(data.get("name") or "").strip()
+    email = str(data.get("email") or "").strip().lower()  # emails are case-insensitive
+    password = str(data.get("password") or "")
+
+    if not name or not email or "@" not in email:
+        return jsonify({"error": "A name and a valid email are required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "This email is already registered"}), 400
+
+    user = User(
+        name=name,
+        email=email,
+        # generate_password_hash salts + hashes; the plaintext is never stored.
+        password_hash=generate_password_hash(password),
+        # Optional home location (used later for "who should be alerted?").
+        home_lat=data.get("home_lat"),
+        home_lng=data.get("home_lng"),
+    )
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify({"token": create_token(user.id), "user": user.to_dict()}), 201
+
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    """Log in with {email, password}; returns a fresh JWT."""
+    data = request.get_json(silent=True)
+    if data is None:
+        return jsonify({"error": "Request body must be JSON"}), 400
+
+    email = str(data.get("email") or "").strip().lower()
+    password = str(data.get("password") or "")
+
+    user = User.query.filter_by(email=email).first()
+    # One combined check + one generic message, so an attacker can't probe
+    # which emails have accounts.
+    if user is None or not check_password_hash(user.password_hash, password):
+        return jsonify({"error": "Invalid email or password"}), 401
+
+    return jsonify({"token": create_token(user.id), "user": user.to_dict()})
+
+
+# --- Report routes ----------------------------------------------------------
+
 @app.route("/api/reports", methods=["GET"])
 def list_reports():
-    """Return every report, newest first, as a JSON array."""
+    """Return every report, newest first, as a JSON array. Public - anyone
+    should be able to SEE incidents; only reporting needs an account."""
     reports = Report.query.order_by(Report.created_at.desc()).all()
     return jsonify([r.to_dict() for r in reports])
 
 
 @app.route("/api/reports", methods=["POST"])
-def create_report():
-    """Create a report from a JSON body: {title, description, lat, lng}."""
-    data = request.get_json(silent=True)  # silent=True -> None instead of a crash on bad JSON
+@token_required  # rejects the request with 401 unless a valid JWT is presented
+def create_report(current_user):
+    """Create a report from a JSON body:
+    {title, description, category, severity, lat, lng}."""
+    data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Request body must be JSON"}), 400
 
@@ -85,6 +154,14 @@ def create_report():
     description = str(data.get("description") or "").strip()
     if not title or not description:
         return jsonify({"error": "title and description are required"}), 400
+
+    # Category and severity must be one of the allowed values (see models.py).
+    category = str(data.get("category") or "other").lower()
+    severity = str(data.get("severity") or "medium").lower()
+    if category not in CATEGORIES:
+        return jsonify({"error": f"category must be one of: {sorted(CATEGORIES)}"}), 400
+    if severity not in SEVERITIES:
+        return jsonify({"error": f"severity must be one of: {sorted(SEVERITIES)}"}), 400
 
     # Validate coordinates: must be numbers within the valid lat/lng ranges.
     try:
@@ -95,7 +172,15 @@ def create_report():
     if not (-90 <= lat <= 90 and -180 <= lng <= 180):
         return jsonify({"error": "lat/lng out of range"}), 400
 
-    report = Report(title=title, description=description, lat=lat, lng=lng)
+    report = Report(
+        title=title,
+        description=description,
+        category=category,
+        severity=severity,
+        lat=lat,
+        lng=lng,
+        user_id=current_user.id,  # we know who this is thanks to the JWT
+    )
     db.session.add(report)
     db.session.commit()
 

@@ -18,16 +18,21 @@
       position: absolute;
       top: 12px; right: 12px;
       z-index: 1000;               /* above the map tiles */
-      width: 270px;
+      width: 280px;
+      max-height: calc(100% - 24px);
+      overflow-y: auto;
       background: #ffffff;
       border-radius: 10px;
       box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
       padding: 14px;
+      box-sizing: border-box;
     }
-    #panel h2 { margin: 0 0 4px; font-size: 17px; }
+    #panel h2 { margin: 0 0 8px; font-size: 17px; }
+    #panel h3 { margin: 12px 0 4px; font-size: 14px; }
     #panel p.hint { margin: 0 0 10px; font-size: 12px; color: #666; }
+    hr { border: none; border-top: 1px solid #eee; margin: 12px 0; }
 
-    input, textarea, button {
+    input, textarea, select, button {
       width: 100%;
       box-sizing: border-box;
       margin-bottom: 8px;
@@ -35,6 +40,7 @@
       border: 1px solid #ccc;
       border-radius: 6px;
       font-size: 13px;
+      background: #fff;
     }
     textarea { resize: vertical; min-height: 48px; }
     button {
@@ -45,10 +51,21 @@
       cursor: pointer;
     }
     button:hover { background: #c9302c; }
+    button.secondary { background: #4a6fa5; }
+    button.secondary:hover { background: #3d5c8a; }
+    .row { display: flex; gap: 6px; }        /* two buttons side by side */
+    .row button { flex: 1; }
 
-    #status { font-size: 12px; min-height: 16px; margin: 0; }
-    #status.ok  { color: #2e7d32; }
-    #status.err { color: #c62828; }
+    #userBox { font-size: 13px; margin-bottom: 4px; }
+    #logoutLink { color: #4a6fa5; cursor: pointer; text-decoration: underline; }
+
+    .status { font-size: 12px; min-height: 16px; margin: 0; }
+    .status.ok  { color: #2e7d32; }
+    .status.err { color: #c62828; }
+
+    /* Legend for marker colours */
+    #legend { font-size: 12px; color: #444; margin-top: 6px; }
+    .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; }
   </style>
 </head>
 <body>
@@ -57,15 +74,62 @@
 
   <!-- Floating control panel -->
   <div id="panel">
-    <h2>Report an incident</h2>
+    <h2>Disaster Alert &amp; Response</h2>
+
+    <!-- Shown while logged OUT -->
+    <div id="authBox">
+      <input id="regName" placeholder="Name (only needed to register)" />
+      <input id="email" placeholder="Email" />
+      <input id="password" type="password" placeholder="Password (6+ chars)" />
+      <div class="row">
+        <button id="loginBtn" class="secondary">Log in</button>
+        <button id="registerBtn" class="secondary">Register</button>
+      </div>
+      <p id="authStatus" class="status"></p>
+    </div>
+
+    <!-- Shown while logged IN -->
+    <div id="userBox" hidden>
+      Logged in as <b id="userName"></b> &middot; <span id="logoutLink">log out</span>
+    </div>
+
+    <hr />
+
+    <h3>Report an incident</h3>
     <p class="hint">1. Click the map to drop a pin.<br />2. Fill the form and submit.</p>
     <input id="title" placeholder="Title (e.g. Flooded underpass)" />
     <textarea id="description" placeholder="Describe what you see..."></textarea>
+    <select id="category">
+      <option value="flood">Flood</option>
+      <option value="fire">Fire</option>
+      <option value="accident">Accident</option>
+      <option value="roadblock">Roadblock</option>
+      <option value="medical">Medical</option>
+      <option value="other" selected>Other</option>
+    </select>
+    <select id="severity">
+      <option value="low">Low severity</option>
+      <option value="medium" selected>Medium severity</option>
+      <option value="high">High severity</option>
+    </select>
     <button id="submitBtn">Submit report</button>
-    <p id="status"></p>
+    <p id="status" class="status"></p>
+
+    <div id="legend">
+      <span class="dot" style="background:#2e7d32"></span>low
+      <span class="dot" style="background:#ef6c00"></span>medium
+      <span class="dot" style="background:#c62828"></span>high
+    </div>
   </div>
 
   <script>
+    // --- Auth state -----------------------------------------------------------
+    // The JWT lives in a plain JS variable (NOT localStorage): it disappears
+    // when the tab closes, which avoids a stolen-token-from-storage class of
+    // attacks. Fine for this app; a refresh just means logging in again.
+    let token = null;
+    let currentUser = null;
+
     // --- Map setup ----------------------------------------------------------
     // Centre on Noida (Sector 62) by default; zoom 12 shows the whole city.
     const map = L.map("map").setView([28.61, 77.36], 12);
@@ -91,20 +155,41 @@
       }
     });
 
-    // --- Helpers ----------------------------------------------------------------
-    const statusEl = document.getElementById("status");
-    function showStatus(msg, isError) {
-      statusEl.textContent = msg;
-      statusEl.className = isError ? "err" : "ok";
+    // --- Small helpers ----------------------------------------------------------
+    const $ = (id) => document.getElementById(id);
+
+    function showStatus(el, msg, isError) {
+      el.textContent = msg;
+      el.className = "status " + (isError ? "err" : "ok");
     }
 
-    // Add a permanent marker for a saved report, with a details popup.
+    // POST JSON to the API; attaches the JWT when we have one.
+    async function api(path, body) {
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = "Bearer " + token;  // <- JWT goes here
+      const res = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+      return { status: res.status, data: await res.json() };
+    }
+
+    // --- Markers ----------------------------------------------------------------
+    // Coloured circle markers: green/orange/red by severity. circleMarker is
+    // simpler than custom icon images - it's just a styled SVG circle.
+    const SEVERITY_COLOURS = { low: "#2e7d32", medium: "#ef6c00", high: "#c62828" };
+
     function addReportMarker(report) {
       const when = new Date(report.created_at + "Z").toLocaleString();
-      L.marker([report.lat, report.lng])
+      L.circleMarker([report.lat, report.lng], {
+        radius: 9,
+        color: "#ffffff",                                // thin white outline
+        weight: 2,
+        fillColor: SEVERITY_COLOURS[report.severity] || "#666",
+        fillOpacity: 0.9,
+      })
         .addTo(map)
         .bindPopup(
-          `<b>${report.title}</b><br>${report.description}<br><small>${when}</small>`
+          `<b>${report.title}</b> <small>[${report.category} / ${report.severity}]</small><br>` +
+          `${report.description}<br>` +
+          `<small>by ${report.reporter} at ${when}</small>`
         );
     }
 
@@ -112,37 +197,77 @@
     fetch("/api/reports")
       .then((res) => res.json())
       .then((reports) => reports.forEach(addReportMarker))
-      .catch(() => showStatus("Could not load reports.", true));
+      .catch(() => showStatus($("status"), "Could not load reports.", true));
+
+    // --- Register / login / logout -----------------------------------------------
+    function setLoggedIn(data) {
+      token = data.token;
+      currentUser = data.user;
+      $("authBox").hidden = true;
+      $("userBox").hidden = false;
+      $("userName").textContent = currentUser.name;
+    }
+
+    $("registerBtn").addEventListener("click", async () => {
+      const body = {
+        name: $("regName").value.trim(),
+        email: $("email").value.trim(),
+        password: $("password").value,
+      };
+      // If the user has dropped a pin, treat it as their home location - used
+      // later to decide who should be alerted about nearby incidents.
+      if (pinLatLng) { body.home_lat = pinLatLng.lat; body.home_lng = pinLatLng.lng; }
+
+      const { status, data } = await api("/api/register", body);
+      if (status === 201) setLoggedIn(data);
+      else showStatus($("authStatus"), data.error || "Registration failed.", true);
+    });
+
+    $("loginBtn").addEventListener("click", async () => {
+      const { status, data } = await api("/api/login", {
+        email: $("email").value.trim(),
+        password: $("password").value,
+      });
+      if (status === 200) setLoggedIn(data);
+      else showStatus($("authStatus"), data.error || "Login failed.", true);
+    });
+
+    $("logoutLink").addEventListener("click", () => {
+      token = null;                      // forgetting the token IS logging out -
+      currentUser = null;                // the server keeps no session state
+      $("authBox").hidden = false;
+      $("userBox").hidden = true;
+      showStatus($("authStatus"), "Logged out.", false);
+    });
 
     // --- Submit a new report ----------------------------------------------------
-    document.getElementById("submitBtn").addEventListener("click", async () => {
-      const title = document.getElementById("title").value.trim();
-      const description = document.getElementById("description").value.trim();
+    $("submitBtn").addEventListener("click", async () => {
+      if (!token) return showStatus($("status"), "Log in (or register) to report.", true);
+      if (!pinLatLng) return showStatus($("status"), "Click the map to drop a pin first.", true);
 
-      if (!pinLatLng) return showStatus("Click the map to drop a pin first.", true);
-      if (!title || !description) return showStatus("Title and description are required.", true);
+      const title = $("title").value.trim();
+      const description = $("description").value.trim();
+      if (!title || !description) {
+        return showStatus($("status"), "Title and description are required.", true);
+      }
 
-      const res = await fetch("/api/reports", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: title,
-          description: description,
-          lat: pinLatLng.lat,
-          lng: pinLatLng.lng,
-        }),
+      const { status, data } = await api("/api/reports", {
+        title: title,
+        description: description,
+        category: $("category").value,
+        severity: $("severity").value,
+        lat: pinLatLng.lat,
+        lng: pinLatLng.lng,
       });
 
-      if (res.status === 201) {
-        const saved = await res.json();
-        addReportMarker(saved);                 // show it immediately
+      if (status === 201) {
+        addReportMarker(data);                               // show it immediately
         map.removeLayer(pin); pin = null; pinLatLng = null;  // clear the temp pin
-        document.getElementById("title").value = "";
-        document.getElementById("description").value = "";
-        showStatus("Report submitted!", false);
+        $("title").value = "";
+        $("description").value = "";
+        showStatus($("status"), "Report submitted!", false);
       } else {
-        const err = await res.json();
-        showStatus(err.error || "Something went wrong.", true);
+        showStatus($("status"), data.error || "Something went wrong.", true);
       }
     });
   </script>
