@@ -1,0 +1,41 @@
+# docker-compose.yml
+# -----------------------------------------------------------------------------
+# Runs the SAME container image that would go to the cloud, plus a real
+# PostgreSQL database - so we can demo the "cloud database" path locally.
+#
+#   docker compose up --build     -> app on http://localhost:8000
+#   docker compose down           -> stop (add -v to also wipe the DB data)
+#
+# Note how the app switches from SQLite to Postgres purely via DATABASE_URL.
+# -----------------------------------------------------------------------------
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: disaster
+      POSTGRES_PASSWORD: disaster123     # demo password - fine locally, never in production
+      POSTGRES_DB: disaster
+    volumes:
+      - pgdata:/var/lib/postgresql/data  # keep data across restarts
+    healthcheck:                         # "am I ready to accept connections?"
+      test: ["CMD-SHELL", "pg_isready -U disaster"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  web:
+    build: .                             # build from the Dockerfile in this folder
+    ports:
+      - "8000:8000"                      # host:container
+    environment:
+      # Same code as SQLite mode - only this variable changes. "db" resolves to
+      # the database container via compose's built-in DNS.
+      DATABASE_URL: postgresql://disaster:disaster123@db:5432/disaster
+      JWT_SECRET: compose-demo-secret
+    depends_on:
+      db:
+        condition: service_healthy       # wait until Postgres is actually ready
+
+volumes:
+  pgdata:

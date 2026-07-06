@@ -19,3 +19,6 @@ Thumbs.db
 
 # Packaging artifacts (Lambda zip in iteration 3)
 *.zip
+
+# Elastic Beanstalk CLI state (machine-specific; recreated by `eb init`)
+.elasticbeanstalk/

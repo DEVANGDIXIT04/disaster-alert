@@ -4,13 +4,16 @@
 #
 # Spiral model progress:
 #   Iteration 1: reports + map (GET/POST /api/reports, static page).
-#   Iteration 2 (this one): users, JWT auth, category + severity.
-#     - POST /api/register  -> create account, get a token
-#     - POST /api/login     -> get a token
-#     - POST /api/reports   -> now requires a valid token
+#   Iteration 2: users, JWT auth, category + severity.
+#   Iteration 3 (this one): geo queries + serverless + cloud-ready.
+#     - GET /api/reports/nearby  -> reports within a radius (haversine)
+#     - POST /api/reports now also computes "who would be alerted", using
+#       the SAME function that runs as an AWS Lambda in the cloud.
+#     - DATABASE_URL switches SQLite -> PostgreSQL with zero code changes.
 #
 # Run locally:  pip install -r requirements.txt && python app.py
 # Run tests:    pytest
+# Run in Docker (with Postgres):  docker compose up --build
 # -----------------------------------------------------------------------------
 
 import os
@@ -20,6 +23,14 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from auth import create_token, token_required
 from models import db, Report, User, CATEGORIES, SEVERITIES
+# The notification logic lives in serverless/notify_lambda.py so the exact
+# same file can be zipped and deployed as an AWS Lambda function. Importing
+# it here is the "local path"; Lambda is the "cloud path".
+from serverless.notify_lambda import find_nearby_users, haversine_km
+
+# When a report is created, users whose home is within this many km of the
+# incident are considered "alerted".
+ALERT_RADIUS_KM = 10
 
 # --- App and database setup -------------------------------------------------
 
@@ -69,7 +80,7 @@ def home():
 
 @app.route("/api/health")
 def health():
-    """Used by humans and (later) by the AWS load balancer to check liveness."""
+    """Used by humans and by the AWS health check to confirm the app is up."""
     return jsonify({"status": "ok"})
 
 
@@ -101,7 +112,8 @@ def register():
         email=email,
         # generate_password_hash salts + hashes; the plaintext is never stored.
         password_hash=generate_password_hash(password),
-        # Optional home location (used later for "who should be alerted?").
+        # Optional home location, used to decide who gets alerted about
+        # incidents near them.
         home_lat=data.get("home_lat"),
         home_lng=data.get("home_lng"),
     )
@@ -144,7 +156,10 @@ def list_reports():
 @token_required  # rejects the request with 401 unless a valid JWT is presented
 def create_report(current_user):
     """Create a report from a JSON body:
-    {title, description, category, severity, lat, lng}."""
+    {title, description, category, severity, lat, lng}.
+
+    After saving, runs the notification logic and returns the list of users
+    who would be alerted (same code that runs as the AWS Lambda)."""
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Request body must be JSON"}), 400
@@ -184,14 +199,57 @@ def create_report(current_user):
     db.session.add(report)
     db.session.commit()
 
+    # --- Notification step (the "serverless" logic, running locally) ---------
+    # Collect every user who shared a home location, as plain dicts, and ask
+    # the shared function who lives close enough to care.
+    candidates = [
+        {"id": u.id, "name": u.name, "email": u.email,
+         "home_lat": u.home_lat, "home_lng": u.home_lng}
+        for u in User.query.filter(User.home_lat.isnot(None),
+                                   User.home_lng.isnot(None)).all()
+    ]
+    alerted = find_nearby_users(lat, lng, ALERT_RADIUS_KM, candidates)
+
+    response = report.to_dict()
+    response["alerted_users"] = alerted
+    response["alert_radius_km"] = ALERT_RADIUS_KM
     # 201 Created is the correct status code for a successful POST that
     # created a new resource.
-    return jsonify(report.to_dict()), 201
+    return jsonify(response), 201
+
+
+@app.route("/api/reports/nearby")
+def nearby_reports():
+    """Reports within a radius: /api/reports/nearby?lat=..&lng=..&radius_km=..
+
+    We fetch all reports and filter with the haversine formula in Python.
+    For a city-scale student project that is fast enough and avoids needing
+    a spatial database extension (PostGIS) - a deliberate simplicity choice.
+    """
+    try:
+        lat = float(request.args["lat"])
+        lng = float(request.args["lng"])
+        radius_km = float(request.args.get("radius_km", 5))
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "lat and lng query params are required numbers"}), 400
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180) or radius_km <= 0:
+        return jsonify({"error": "lat/lng out of range or radius not positive"}), 400
+
+    nearby = []
+    for report in Report.query.all():
+        distance = haversine_km(lat, lng, report.lat, report.lng)
+        if distance <= radius_km:
+            item = report.to_dict()
+            item["distance_km"] = round(distance, 2)
+            nearby.append(item)
+    nearby.sort(key=lambda r: r["distance_km"])  # closest first
+
+    return jsonify({"count": len(nearby), "radius_km": radius_km, "reports": nearby})
 
 
 # --- Entry point ------------------------------------------------------------
 
 if __name__ == "__main__":
     # Development server only. In the cloud, gunicorn runs the app instead
-    # (see Procfile in a later iteration).
+    # (see Procfile / Dockerfile).
     app.run(debug=True, port=5000)

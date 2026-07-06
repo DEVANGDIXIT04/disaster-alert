@@ -53,8 +53,8 @@
     button:hover { background: #c9302c; }
     button.secondary { background: #4a6fa5; }
     button.secondary:hover { background: #3d5c8a; }
-    .row { display: flex; gap: 6px; }        /* two buttons side by side */
-    .row button { flex: 1; }
+    .row { display: flex; gap: 6px; }        /* controls side by side */
+    .row > * { flex: 1; }
 
     #userBox { font-size: 13px; margin-bottom: 4px; }
     #logoutLink { color: #4a6fa5; cursor: pointer; text-decoration: underline; }
@@ -66,6 +66,23 @@
     /* Legend for marker colours */
     #legend { font-size: 12px; color: #444; margin-top: 6px; }
     .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; }
+
+    /* Banner listing nearby incidents (bottom-left, above the map) */
+    #banner {
+      position: absolute;
+      bottom: 20px; left: 12px;
+      z-index: 1000;
+      max-width: 320px;
+      background: #fff8e1;                 /* soft warning yellow */
+      border: 1px solid #f0c36d;
+      border-radius: 10px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+      padding: 10px 14px;
+      font-size: 13px;
+    }
+    #banner b { display: block; margin-bottom: 4px; }
+    #banner ul { margin: 0; padding-left: 18px; }
+    #bannerClose { float: right; cursor: pointer; color: #888; font-weight: bold; }
   </style>
 </head>
 <body>
@@ -115,11 +132,28 @@
     <button id="submitBtn">Submit report</button>
     <p id="status" class="status"></p>
 
+    <hr />
+
+    <h3>What's near me?</h3>
+    <p class="hint">Uses your dropped pin, or your device location if no pin.</p>
+    <div class="row">
+      <input id="radius" type="number" value="5" min="1" max="100" title="radius in km" />
+      <button id="nearbyBtn" class="secondary">Search</button>
+    </div>
+    <p id="nearbyStatus" class="status"></p>
+
     <div id="legend">
       <span class="dot" style="background:#2e7d32"></span>low
       <span class="dot" style="background:#ef6c00"></span>medium
       <span class="dot" style="background:#c62828"></span>high
     </div>
+  </div>
+
+  <!-- Nearby-results banner, hidden until a search is made -->
+  <div id="banner" hidden>
+    <span id="bannerClose">&times;</span>
+    <b id="bannerTitle"></b>
+    <ul id="bannerList"></ul>
   </div>
 
   <script>
@@ -175,15 +209,16 @@
     // Coloured circle markers: green/orange/red by severity. circleMarker is
     // simpler than custom icon images - it's just a styled SVG circle.
     const SEVERITY_COLOURS = { low: "#2e7d32", medium: "#ef6c00", high: "#c62828" };
+    const DEFAULT_STYLE = { radius: 9, color: "#ffffff", weight: 2, fillOpacity: 0.9 };
+    const HIGHLIGHT_STYLE = { radius: 12, color: "#1a237e", weight: 4 };  // dark-blue ring
+
+    const markersById = {};   // report id -> Leaflet marker, so we can highlight later
 
     function addReportMarker(report) {
       const when = new Date(report.created_at + "Z").toLocaleString();
-      L.circleMarker([report.lat, report.lng], {
-        radius: 9,
-        color: "#ffffff",                                // thin white outline
-        weight: 2,
+      const marker = L.circleMarker([report.lat, report.lng], {
+        ...DEFAULT_STYLE,
         fillColor: SEVERITY_COLOURS[report.severity] || "#666",
-        fillOpacity: 0.9,
       })
         .addTo(map)
         .bindPopup(
@@ -191,6 +226,7 @@
           `${report.description}<br>` +
           `<small>by ${report.reporter} at ${when}</small>`
         );
+      markersById[report.id] = marker;
     }
 
     // --- Load existing reports on page start -----------------------------------
@@ -215,7 +251,7 @@
         password: $("password").value,
       };
       // If the user has dropped a pin, treat it as their home location - used
-      // later to decide who should be alerted about nearby incidents.
+      // to decide who should be alerted about nearby incidents.
       if (pinLatLng) { body.home_lat = pinLatLng.lat; body.home_lng = pinLatLng.lng; }
 
       const { status, data } = await api("/api/register", body);
@@ -265,10 +301,87 @@
         map.removeLayer(pin); pin = null; pinLatLng = null;  // clear the temp pin
         $("title").value = "";
         $("description").value = "";
-        showStatus($("status"), "Report submitted!", false);
+        // The server ran the notification logic (same code as the AWS Lambda)
+        // and told us who would be alerted.
+        const n = (data.alerted_users || []).length;
+        showStatus($("status"),
+          `Report submitted! ${n} user(s) within ${data.alert_radius_km} km would be alerted.`,
+          false);
       } else {
         showStatus($("status"), data.error || "Something went wrong.", true);
       }
+    });
+
+    // --- "What's near me?" -------------------------------------------------------
+    let searchCircle = null;   // the dashed circle showing the searched area
+
+    function resetHighlights() {
+      for (const id in markersById) {
+        markersById[id].setStyle(DEFAULT_STYLE);
+      }
+      if (searchCircle) { map.removeLayer(searchCircle); searchCircle = null; }
+    }
+
+    // Figure out where "me" is: prefer the dropped pin (works everywhere),
+    // otherwise ask the browser for the device location (needs permission and,
+    // on most browsers, an HTTPS or localhost page).
+    function getMyLocation() {
+      return new Promise((resolve, reject) => {
+        if (pinLatLng) return resolve(pinLatLng);
+        if (!navigator.geolocation) return reject(new Error("no geolocation"));
+        navigator.geolocation.getCurrentPosition(
+          (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+          () => reject(new Error("location denied"))
+        );
+      });
+    }
+
+    $("nearbyBtn").addEventListener("click", async () => {
+      let here;
+      try {
+        here = await getMyLocation();
+      } catch {
+        return showStatus($("nearbyStatus"),
+          "Drop a pin on the map (or allow location access) first.", true);
+      }
+      const radiusKm = parseFloat($("radius").value) || 5;
+
+      const res = await fetch(
+        `/api/reports/nearby?lat=${here.lat}&lng=${here.lng}&radius_km=${radiusKm}`
+      );
+      if (!res.ok) {
+        return showStatus($("nearbyStatus"), "Search failed.", true);
+      }
+      const data = await res.json();
+
+      // Highlight matching markers and draw the searched circle.
+      resetHighlights();
+      searchCircle = L.circle([here.lat, here.lng], {
+        radius: radiusKm * 1000,          // Leaflet wants metres
+        color: "#1a237e",
+        dashArray: "6 6",
+        fill: false,
+      }).addTo(map);
+      map.fitBounds(searchCircle.getBounds());
+
+      data.reports.forEach((r) => {
+        if (markersById[r.id]) markersById[r.id].setStyle(HIGHLIGHT_STYLE);
+      });
+
+      // Show the banner with a short list of what was found.
+      $("bannerTitle").textContent =
+        `${data.count} incident(s) within ${data.radius_km} km`;
+      $("bannerList").innerHTML = data.reports
+        .map((r) => `<li>${r.title} - ${r.distance_km} km (${r.severity})</li>`)
+        .join("");
+      $("banner").hidden = false;
+
+      showStatus($("nearbyStatus"), `Found ${data.count} incident(s).`, false);
+    });
+
+    $("bannerClose").addEventListener("click", () => {
+      $("banner").hidden = true;
+      resetHighlights();
     });
   </script>
 </body>

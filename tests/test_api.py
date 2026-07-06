@@ -133,3 +133,63 @@ def test_create_report_bad_coordinates_rejected(client):
     res = client.post("/api/reports", json=bad,
                       headers={"Authorization": f"Bearer {token}"})
     assert res.status_code == 400
+
+
+# --- Geo features (iteration 3) --------------------------------------------------
+
+def test_haversine_known_distance():
+    """Sanity-check the formula: Noida Sector 62 to Connaught Place is ~16 km."""
+    from serverless.notify_lambda import haversine_km
+    d = haversine_km(28.6272, 77.3649, 28.6315, 77.2167)
+    assert 14 < d < 17
+
+
+def test_nearby_requires_lat_lng(client):
+    res = client.get("/api/reports/nearby")           # no query params at all
+    assert res.status_code == 400
+
+
+def test_nearby_filters_by_radius(client):
+    token = register_and_get_token(client)
+    headers = {"Authorization": f"Bearer {token}"}
+    # One report right here, one ~30 km away.
+    client.post("/api/reports", json=GOOD_REPORT, headers=headers)
+    far = dict(GOOD_REPORT, title="Far away fire", lat=28.90, lng=77.60)
+    client.post("/api/reports", json=far, headers=headers)
+
+    res = client.get("/api/reports/nearby?lat=28.62&lng=77.36&radius_km=5")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["count"] == 1                          # only the close one
+    assert data["reports"][0]["title"] == "Flooded underpass"
+    assert data["reports"][0]["distance_km"] <= 5
+
+
+def test_create_report_returns_alerted_users(client):
+    # This user's home is AT the incident location -> must be alerted.
+    res = client.post("/api/register", json={
+        "name": "Near Resident", "email": "near@example.com",
+        "password": "secret123", "home_lat": 28.62, "home_lng": 77.36,
+    })
+    token = res.get_json()["token"]
+
+    # A second user far away (Mumbai) -> must NOT be alerted.
+    client.post("/api/register", json={
+        "name": "Far Resident", "email": "far@example.com",
+        "password": "secret123", "home_lat": 19.07, "home_lng": 72.87,
+    })
+
+    res = client.post("/api/reports", json=GOOD_REPORT,
+                      headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 201
+    alerted = res.get_json()["alerted_users"]
+    assert [u["name"] for u in alerted] == ["Near Resident"]
+    assert alerted[0]["distance_km"] < 1
+
+
+def test_lambda_handler_with_sample_event():
+    """The exact event we document in serverless/README.md must work."""
+    from serverless.notify_lambda import lambda_handler
+    result = lambda_handler({"lat": 28.61, "lng": 77.36, "radius_km": 5}, None)
+    assert result["count"] >= 1                        # demo users live nearby
+    assert result["count"] == len(result["alerted_users"])
