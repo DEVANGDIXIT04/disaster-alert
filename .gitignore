@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local SQLite database files (recreated automatically on startup)
+*.db
+instance/
+
+# Environment secrets - never commit real credentials
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+
+# Packaging artifacts (Lambda zip in iteration 3)
+*.zip

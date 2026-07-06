@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Disaster Alert & Response</title>
+
+  <!-- Leaflet: a small open-source map library, loaded from a CDN (no build step). -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    /* The map fills the whole screen; the panel floats on top of it. */
+    html, body { height: 100%; margin: 0; font-family: system-ui, Arial, sans-serif; }
+    #map { height: 100%; }
+
+    #panel {
+      position: absolute;
+      top: 12px; right: 12px;
+      z-index: 1000;               /* above the map tiles */
+      width: 270px;
+      background: #ffffff;
+      border-radius: 10px;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+      padding: 14px;
+    }
+    #panel h2 { margin: 0 0 4px; font-size: 17px; }
+    #panel p.hint { margin: 0 0 10px; font-size: 12px; color: #666; }
+
+    input, textarea, button {
+      width: 100%;
+      box-sizing: border-box;
+      margin-bottom: 8px;
+      padding: 7px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    textarea { resize: vertical; min-height: 48px; }
+    button {
+      background: #d9534f;         /* alert red */
+      color: white;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: #c9302c; }
+
+    #status { font-size: 12px; min-height: 16px; margin: 0; }
+    #status.ok  { color: #2e7d32; }
+    #status.err { color: #c62828; }
+  </style>
+</head>
+<body>
+  <!-- The map container -->
+  <div id="map"></div>
+
+  <!-- Floating control panel -->
+  <div id="panel">
+    <h2>Report an incident</h2>
+    <p class="hint">1. Click the map to drop a pin.<br />2. Fill the form and submit.</p>
+    <input id="title" placeholder="Title (e.g. Flooded underpass)" />
+    <textarea id="description" placeholder="Describe what you see..."></textarea>
+    <button id="submitBtn">Submit report</button>
+    <p id="status"></p>
+  </div>
+
+  <script>
+    // --- Map setup ----------------------------------------------------------
+    // Centre on Noida (Sector 62) by default; zoom 12 shows the whole city.
+    const map = L.map("map").setView([28.61, 77.36], 12);
+
+    // OpenStreetMap tiles: free map images, no API key needed.
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+
+    // --- Pin dropping ---------------------------------------------------------
+    // The user clicks the map to choose the incident location. We remember the
+    // coordinates and show a draggable marker so they can fine-tune it.
+    let pin = null;          // the temporary marker
+    let pinLatLng = null;    // {lat, lng} of the chosen spot
+
+    map.on("click", (e) => {
+      pinLatLng = e.latlng;
+      if (pin) {
+        pin.setLatLng(e.latlng);       // move the existing pin
+      } else {
+        pin = L.marker(e.latlng, { draggable: true }).addTo(map);
+        pin.on("dragend", () => { pinLatLng = pin.getLatLng(); });
+      }
+    });
+
+    // --- Helpers ----------------------------------------------------------------
+    const statusEl = document.getElementById("status");
+    function showStatus(msg, isError) {
+      statusEl.textContent = msg;
+      statusEl.className = isError ? "err" : "ok";
+    }
+
+    // Add a permanent marker for a saved report, with a details popup.
+    function addReportMarker(report) {
+      const when = new Date(report.created_at + "Z").toLocaleString();
+      L.marker([report.lat, report.lng])
+        .addTo(map)
+        .bindPopup(
+          `<b>${report.title}</b><br>${report.description}<br><small>${when}</small>`
+        );
+    }
+
+    // --- Load existing reports on page start -----------------------------------
+    fetch("/api/reports")
+      .then((res) => res.json())
+      .then((reports) => reports.forEach(addReportMarker))
+      .catch(() => showStatus("Could not load reports.", true));
+
+    // --- Submit a new report ----------------------------------------------------
+    document.getElementById("submitBtn").addEventListener("click", async () => {
+      const title = document.getElementById("title").value.trim();
+      const description = document.getElementById("description").value.trim();
+
+      if (!pinLatLng) return showStatus("Click the map to drop a pin first.", true);
+      if (!title || !description) return showStatus("Title and description are required.", true);
+
+      const res = await fetch("/api/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: title,
+          description: description,
+          lat: pinLatLng.lat,
+          lng: pinLatLng.lng,
+        }),
+      });
+
+      if (res.status === 201) {
+        const saved = await res.json();
+        addReportMarker(saved);                 // show it immediately
+        map.removeLayer(pin); pin = null; pinLatLng = null;  // clear the temp pin
+        document.getElementById("title").value = "";
+        document.getElementById("description").value = "";
+        showStatus("Report submitted!", false);
+      } else {
+        const err = await res.json();
+        showStatus(err.error || "Something went wrong.", true);
+      }
+    });
+  </script>
+</body>
+</html>

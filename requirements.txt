@@ -1,0 +1,4 @@
+# Iteration 1: just Flask and its database extension.
+# (Auth, deployment, and Postgres packages arrive in later iterations.)
+Flask==3.0.3
+Flask-SQLAlchemy==3.1.1
