@@ -43,6 +43,7 @@ logic (`serverless/`) is an independently deployable unit.
 | v1 | `v1: report + map` | Flask + SQLite, Report model, GET/POST /api/reports, Leaflet page: drop a pin, submit, see markers |
 | v2 | `v2: auth + categories` | User model, register/login, JWT (`auth.py`), protected report creation, category + severity, coloured markers, pytest suite |
 | v3 | `v3: nearby + serverless + docker + aws` | Haversine + /api/reports/nearby, Lambda function (also runs locally), "near me" UI, Dockerfile + docker-compose (Postgres), DATABASE_URL switching, AWS deploy docs |
+| v4 | `v4: cloud polish` | API invokes the real deployed Lambda on AWS (boto3, `notify_source` in the response), demo seed script, 30 s map auto-refresh, auth rate limiting + input caps, GitHub Actions CI |
 
 ## Run locally in 3 commands
 
@@ -54,6 +55,9 @@ python app.py
 
 (SQLite file `local.db` is created automatically. Tests: `pytest`.
 Schema changed between versions? Just delete `local.db` — it's recreated.)
+
+Optional: `python seed.py` fills an empty database with 8 demo incidents and
+a demo login (`demo@example.com` / `demo123456`) so the map isn't blank.
 
 ## Run with Docker + PostgreSQL
 
@@ -76,7 +80,7 @@ docker compose up --build
 | RESTful API | `app.py` — resource routes under `/api`, proper verbs + status codes (200/201/400/401) |
 | Database Integration | `models.py` (SQLAlchemy models), `app.py:~45` (`DATABASE_URL` env switch SQLite↔Postgres) |
 | Microservice split | `serverless/notify_lambda.py` — notification logic is a separate deployable unit consumed by the API |
-| Serverless (AWS Lambda) | `serverless/notify_lambda.py` (`lambda_handler`), deploy steps in `serverless/README.md` |
+| Serverless (AWS Lambda) | `serverless/notify_lambda.py` (`lambda_handler`); in production the API invokes the deployed function via boto3 (`run_notify_logic` in `app.py`) — the response's `notify_source` field proves which path ran |
 | Containerization | `Dockerfile`, `docker-compose.yml` (app + postgres:16) |
 | Security / Auth (JWT) | `auth.py` (PyJWT sign/verify, `@token_required`), password hashing in `app.py` register/login |
 

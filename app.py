@@ -16,7 +16,10 @@
 # Run in Docker (with Postgres):  docker compose up --build
 # -----------------------------------------------------------------------------
 
+import json
 import os
+import time
+from collections import defaultdict
 
 from flask import Flask, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -31,6 +34,11 @@ from serverless.notify_lambda import find_nearby_users, haversine_km
 # When a report is created, users whose home is within this many km of the
 # incident are considered "alerted".
 ALERT_RADIUS_KM = 10
+
+# If set (on AWS), the API invokes the real deployed Lambda function by name
+# instead of calling the imported Python function. Same logic either way -
+# this just proves the serverless path is genuinely used in production.
+NOTIFY_LAMBDA = os.environ.get("NOTIFY_LAMBDA")
 
 # --- App and database setup -------------------------------------------------
 
@@ -70,6 +78,60 @@ def add_cors_headers(response):
     return response
 
 
+# --- Rate limiting ------------------------------------------------------------
+# A tiny in-memory limiter for the auth endpoints, so nobody can hammer
+# register/login with a password-guessing script. Per-process memory is enough
+# for a single instance; a multi-instance deployment would use a shared store
+# (future scope). Disabled under pytest (TESTING=True) so tests can log in freely.
+
+_attempts = defaultdict(list)   # ip address -> [timestamps of recent requests]
+
+def rate_limited(ip, limit=10, window_seconds=60):
+    """True if this ip already made `limit` auth requests in the last minute."""
+    now = time.time()
+    _attempts[ip] = [t for t in _attempts[ip] if now - t < window_seconds]
+    if len(_attempts[ip]) >= limit:
+        return True
+    _attempts[ip].append(now)
+    return False
+
+
+def auth_rate_limit_response():
+    """The shared 429 (Too Many Requests) response, or None if allowed."""
+    if app.config.get("TESTING"):
+        return None
+    if rate_limited(request.remote_addr or "unknown"):
+        return jsonify({"error": "Too many attempts. Try again in a minute."}), 429
+    return None
+
+
+# --- Notification dispatch ------------------------------------------------------
+
+def run_notify_logic(lat, lng, candidates):
+    """Work out who to alert. Returns (alerted_users, source).
+
+    On AWS (NOTIFY_LAMBDA set): invoke the deployed Lambda function - a real
+    cross-service call, and the response tells the UI it came from "aws-lambda".
+    Anywhere else (or if the call fails): import-and-call the same code locally.
+    """
+    if NOTIFY_LAMBDA:
+        try:
+            import boto3  # only needed on the AWS path
+            client = boto3.client("lambda",
+                                  region_name=os.environ.get("AWS_REGION", "ap-south-1"))
+            resp = client.invoke(
+                FunctionName=NOTIFY_LAMBDA,
+                Payload=json.dumps({"lat": lat, "lng": lng,
+                                    "radius_km": ALERT_RADIUS_KM,
+                                    "users": candidates}),
+            )
+            payload = json.loads(resp["Payload"].read())
+            return payload["alerted_users"], "aws-lambda"
+        except Exception as exc:  # noqa: BLE001 - alerting must never break reporting
+            print(f"Lambda invoke failed ({exc}); falling back to local logic")
+    return find_nearby_users(lat, lng, ALERT_RADIUS_KM, candidates), "local"
+
+
 # --- Basic routes -----------------------------------------------------------
 
 @app.route("/")
@@ -92,6 +154,10 @@ def register():
 
     Returns 201 with a JWT so the user is logged in immediately.
     """
+    limited = auth_rate_limit_response()
+    if limited:
+        return limited
+
     data = request.get_json(silent=True)  # silent=True -> None instead of a crash on bad JSON
     if data is None:
         return jsonify({"error": "Request body must be JSON"}), 400
@@ -102,6 +168,8 @@ def register():
 
     if not name or not email or "@" not in email:
         return jsonify({"error": "A name and a valid email are required"}), 400
+    if len(name) > 80 or len(email) > 120:
+        return jsonify({"error": "name/email too long"}), 400
     if len(password) < 6:
         return jsonify({"error": "Password must be at least 6 characters"}), 400
     if User.query.filter_by(email=email).first():
@@ -126,6 +194,10 @@ def register():
 @app.route("/api/login", methods=["POST"])
 def login():
     """Log in with {email, password}; returns a fresh JWT."""
+    limited = auth_rate_limit_response()
+    if limited:
+        return limited
+
     data = request.get_json(silent=True)
     if data is None:
         return jsonify({"error": "Request body must be JSON"}), 400
@@ -169,6 +241,10 @@ def create_report(current_user):
     description = str(data.get("description") or "").strip()
     if not title or not description:
         return jsonify({"error": "title and description are required"}), 400
+    # Length caps: the DB column allows 120 for title, and a 2000-char cap on
+    # description stops someone dumping megabytes into the popup HTML.
+    if len(title) > 120 or len(description) > 2000:
+        return jsonify({"error": "title max 120 chars, description max 2000"}), 400
 
     # Category and severity must be one of the allowed values (see models.py).
     category = str(data.get("category") or "other").lower()
@@ -199,20 +275,22 @@ def create_report(current_user):
     db.session.add(report)
     db.session.commit()
 
-    # --- Notification step (the "serverless" logic, running locally) ---------
+    # --- Notification step (the "serverless" logic) ---------------------------
     # Collect every user who shared a home location, as plain dicts, and ask
-    # the shared function who lives close enough to care.
+    # who lives close enough to care - via the real Lambda on AWS, or the
+    # imported function locally (see run_notify_logic).
     candidates = [
         {"id": u.id, "name": u.name, "email": u.email,
          "home_lat": u.home_lat, "home_lng": u.home_lng}
         for u in User.query.filter(User.home_lat.isnot(None),
                                    User.home_lng.isnot(None)).all()
     ]
-    alerted = find_nearby_users(lat, lng, ALERT_RADIUS_KM, candidates)
+    alerted, notify_source = run_notify_logic(lat, lng, candidates)
 
     response = report.to_dict()
     response["alerted_users"] = alerted
     response["alert_radius_km"] = ALERT_RADIUS_KM
+    response["notify_source"] = notify_source  # "aws-lambda" in the cloud, "local" otherwise
     # 201 Created is the correct status code for a successful POST that
     # created a new resource.
     return jsonify(response), 201

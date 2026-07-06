@@ -22,3 +22,8 @@ Thumbs.db
 
 # Elastic Beanstalk CLI state (machine-specific; recreated by `eb init`)
 .elasticbeanstalk/
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml

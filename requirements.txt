@@ -6,6 +6,9 @@ Flask-SQLAlchemy==3.1.1
 PyJWT==2.10.1
 gunicorn==23.0.0
 psycopg2-binary==2.9.10
+# Only used when NOTIFY_LAMBDA is set (the AWS path, to invoke the real
+# Lambda function). Harmless locally.
+boto3>=1.34
 
 # --- dev/test only ---
 pytest==8.3.5

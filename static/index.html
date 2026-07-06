@@ -304,8 +304,11 @@
         // The server ran the notification logic (same code as the AWS Lambda)
         // and told us who would be alerted.
         const n = (data.alerted_users || []).length;
+        // notify_source is "aws-lambda" when the API invoked the deployed
+        // Lambda function, "local" when it called the imported copy.
         showStatus($("status"),
-          `Report submitted! ${n} user(s) within ${data.alert_radius_km} km would be alerted.`,
+          `Report submitted! ${n} user(s) within ${data.alert_radius_km} km ` +
+          `would be alerted (computed by ${data.notify_source}).`,
           false);
       } else {
         showStatus($("status"), data.error || "Something went wrong.", true);
@@ -383,6 +386,20 @@
       $("banner").hidden = true;
       resetHighlights();
     });
+
+    // --- Live updates -------------------------------------------------------------
+    // Poll for new reports every 30 s so everyone's map stays in sync. Plain
+    // polling (not WebSockets) keeps the server completely stateless - and at
+    // this scale one GET per client per 30 s is nothing.
+    setInterval(async () => {
+      try {
+        const reports = await (await fetch("/api/reports")).json();
+        // Only draw markers we haven't seen; existing ones are left untouched.
+        reports.forEach((r) => { if (!markersById[r.id]) addReportMarker(r); });
+      } catch {
+        /* transient network error - just try again in 30 s */
+      }
+    }, 30000);
   </script>
 </body>
 </html>

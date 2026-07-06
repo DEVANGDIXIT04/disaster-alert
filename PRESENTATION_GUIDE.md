@@ -20,8 +20,10 @@ plan at the bottom). Have 2-3 reports already submitted so the map isn't empty.
 3. **(60 s) Report an incident.** With the pin still dropped: fill title
    ("Fire near market"), pick category Fire, severity High, Submit. A red
    marker appears instantly, and the status line says *"N user(s) within 10 km
-   would be alerted"* — *"that number came from the same function we also run
-   as an AWS Lambda; locally it's just an import."*
+   would be alerted (computed by aws-lambda)"* — *"that 'aws-lambda' is not a
+   label: the API just invoked our deployed Lambda function over boto3. Run
+   locally, the same line says 'computed by local' — identical logic, two
+   execution homes."* This is the strongest 10 seconds of the demo.
 
 4. **(60 s) What's near me.** Set radius 5 km, click Search. The dashed circle
    is drawn, matching markers get a blue ring, the yellow banner lists each

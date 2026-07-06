@@ -193,3 +193,40 @@ def test_lambda_handler_with_sample_event():
     result = lambda_handler({"lat": 28.61, "lng": 77.36, "radius_km": 5}, None)
     assert result["count"] >= 1                        # demo users live nearby
     assert result["count"] == len(result["alerted_users"])
+
+
+# --- Hardening (v4) ---------------------------------------------------------------
+
+def test_create_report_overlong_title_rejected(client):
+    token = register_and_get_token(client)
+    bad = dict(GOOD_REPORT, title="x" * 121)           # cap is 120
+    res = client.post("/api/reports", json=bad,
+                      headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 400
+
+
+def test_create_report_reports_notify_source(client):
+    token = register_and_get_token(client)
+    res = client.post("/api/reports", json=GOOD_REPORT,
+                      headers={"Authorization": f"Bearer {token}"})
+    # Locally NOTIFY_LAMBDA is unset, so the imported function must be used.
+    assert res.get_json()["notify_source"] == "local"
+
+
+def test_auth_rate_limit_kicks_in():
+    """11th login attempt inside a minute -> 429. Uses TESTING=False because
+    the limiter is deliberately switched off for the rest of the suite."""
+    from app import app, _attempts
+    _attempts.clear()
+    app.config["TESTING"] = False
+    try:
+        with app.test_client() as client:
+            for _ in range(10):
+                client.post("/api/login", json={"email": "x@example.com",
+                                                "password": "wrong"})
+            res = client.post("/api/login", json={"email": "x@example.com",
+                                                  "password": "wrong"})
+            assert res.status_code == 429
+    finally:
+        app.config["TESTING"] = True
+        _attempts.clear()
