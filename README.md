@@ -13,8 +13,9 @@ me?"**, **crowd-verify** whether an incident is still happening, and every new
 report triggers a **serverless function** that works out which nearby residents
 would be alerted.
 
-> **🌐 Live demo:** http://disaster-alert-env.eba-twpixdbf.ap-south-1.elasticbeanstalk.com
-> &nbsp;·&nbsp; Try the demo login **`demo@example.com` / `demo123456`**
+> **🔒 Live demo (HTTPS):** https://65-1-37-139.sslip.io
+> &nbsp;·&nbsp; also at http://disaster-alert-env.eba-twpixdbf.ap-south-1.elasticbeanstalk.com
+> &nbsp;·&nbsp; demo login **`demo@example.com` / `demo123456`**
 
 ---
 
@@ -111,6 +112,7 @@ docker compose up --build     # → http://localhost:8000  (app + postgres:16)
 - App on Elastic Beanstalk → [deploy/aws-elastic-beanstalk.md](deploy/aws-elastic-beanstalk.md)
 - PostgreSQL on RDS → [deploy/aws-rds-setup.md](deploy/aws-rds-setup.md)
 - Lambda → [serverless/README.md](serverless/README.md)
+- HTTPS / TLS (Let's Encrypt) → [deploy/https-setup.md](deploy/https-setup.md)
 
 ## Course concept coverage
 
@@ -131,6 +133,7 @@ docker compose up --build     # → http://localhost:8000  (app + postgres:16)
 - Login/register are **rate-limited** (10 attempts/min per IP) to blunt password guessing.
 - All user-supplied text is **HTML-escaped** before rendering (stored-XSS defence), on top of server-side length caps.
 - Identical login error for wrong email vs. wrong password, so accounts can't be enumerated.
+- Served over **HTTPS** with a Let's Encrypt certificate (see [deploy/https-setup.md](deploy/https-setup.md)).
 
 ## Future scope
 
