@@ -1,8 +1,9 @@
 # HTTPS / TLS setup (how the `https://` URL works)
 
-The live app is served over HTTPS at **https://65-1-37-139.sslip.io** with a
-valid, browser-trusted **Let's Encrypt** certificate — no warnings, and mobile
-geolocation ("what's near me") works because the page is now secure.
+The live app is served over HTTPS at **https://disaster-alert.65-1-37-139.sslip.io**
+with a valid, browser-trusted **Let's Encrypt** certificate — no warnings, and
+mobile geolocation ("what's near me") works because the page is now secure.
+(The plain `https://65-1-37-139.sslip.io` also works — the certificate covers both.)
 
 ## Why a `sslip.io` domain?
 
@@ -17,8 +18,11 @@ resolves any `<ip>.sslip.io` name straight to that IP, no signup:
 65-1-37-139.sslip.io  →  65.1.37.139   (our Elastic Beanstalk instance's Elastic IP)
 ```
 
-Because the instance has a **static Elastic IP**, this name is stable, and
-Let's Encrypt can validate it over HTTP-01 and issue a certificate.
+You can also lead with a friendly label — `disaster-alert.65-1-37-139.sslip.io`
+resolves to the same IP — so the URL reads as the app name (the IP just has to
+appear somewhere in the host). Because the instance has a **static Elastic IP**,
+this name is stable, and Let's Encrypt can validate it over HTTP-01 and issue a
+certificate covering both forms.
 
 ## What was done (one-time)
 

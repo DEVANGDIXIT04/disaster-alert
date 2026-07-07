@@ -13,7 +13,7 @@ me?"**, **crowd-verify** whether an incident is still happening, and every new
 report triggers a **serverless function** that works out which nearby residents
 would be alerted.
 
-> **🔒 Live demo (HTTPS):** https://65-1-37-139.sslip.io
+> **🔒 Live demo (HTTPS):** https://disaster-alert.65-1-37-139.sslip.io
 > &nbsp;·&nbsp; also at http://disaster-alert-env.eba-twpixdbf.ap-south-1.elasticbeanstalk.com
 > &nbsp;·&nbsp; demo login **`demo@example.com` / `demo123456`**
 
