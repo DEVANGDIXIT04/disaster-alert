@@ -230,3 +230,95 @@ def test_auth_rate_limit_kicks_in():
     finally:
         app.config["TESTING"] = True
         _attempts.clear()
+
+
+# --- Crowd-verification voting (v5) ---------------------------------------------
+
+def make_user_token(client, email, home_lat=28.62, home_lng=77.36):
+    """Register a distinct user (each vote must come from a different account)."""
+    res = client.post("/api/register", json={
+        "name": email.split("@")[0], "email": email, "password": "secret123",
+        "home_lat": home_lat, "home_lng": home_lng,
+    })
+    assert res.status_code == 201
+    return res.get_json()["token"]
+
+
+def create_a_report(client):
+    """Create one report and return its id."""
+    token = register_and_get_token(client)
+    res = client.post("/api/reports", json=GOOD_REPORT,
+                      headers={"Authorization": f"Bearer {token}"})
+    return res.get_json()["id"]
+
+
+def test_vote_requires_token(client):
+    rid = create_a_report(client)
+    res = client.post(f"/api/reports/{rid}/vote", json={"still_there": False})
+    assert res.status_code == 401
+
+
+def test_vote_on_missing_report_is_404(client):
+    token = register_and_get_token(client)
+    res = client.post("/api/reports/999/vote", json={"still_there": True},
+                      headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 404
+
+
+def test_vote_bad_body_is_400(client):
+    rid = create_a_report(client)
+    token = make_user_token(client, "voter@example.com")
+    res = client.post(f"/api/reports/{rid}/vote", json={"still_there": "maybe"},
+                      headers={"Authorization": f"Bearer {token}"})
+    assert res.status_code == 400
+
+
+def test_single_gone_vote_does_not_remove(client):
+    """One vote is below the minimum, so the report survives."""
+    rid = create_a_report(client)
+    token = make_user_token(client, "v1@example.com")
+    res = client.post(f"/api/reports/{rid}/vote", json={"still_there": False},
+                      headers={"Authorization": f"Bearer {token}"})
+    body = res.get_json()
+    assert body["removed"] is False
+    assert body["votes_gone"] == 1
+    assert len(client.get("/api/reports").get_json()) == 1   # still listed
+
+
+def test_majority_gone_removes_report(client):
+    """Enough votes with a 'gone' majority -> the report is auto-removed."""
+    from app import VOTES_TO_RESOLVE
+    rid = create_a_report(client)
+    last = None
+    for i in range(VOTES_TO_RESOLVE):
+        token = make_user_token(client, f"gone{i}@example.com")
+        last = client.post(f"/api/reports/{rid}/vote", json={"still_there": False},
+                           headers={"Authorization": f"Bearer {token}"}).get_json()
+    assert last["removed"] is True
+    assert client.get("/api/reports").get_json() == []        # gone from the map
+
+
+def test_still_here_majority_keeps_report(client):
+    """Meets the vote minimum but the majority say it's still here -> kept."""
+    from app import VOTES_TO_RESOLVE
+    rid = create_a_report(client)
+    # One "gone" vote, then enough "still here" votes to outnumber it.
+    client.post(f"/api/reports/{rid}/vote", json={"still_there": False},
+                headers={"Authorization": f"Bearer {make_user_token(client, 'g@example.com')}"})
+    for i in range(VOTES_TO_RESOLVE):
+        client.post(f"/api/reports/{rid}/vote", json={"still_there": True},
+                    headers={"Authorization": f"Bearer {make_user_token(client, f'stay{i}@example.com')}"})
+    assert len(client.get("/api/reports").get_json()) == 1
+
+
+def test_revote_updates_not_duplicates(client):
+    """Voting twice as the same user changes the vote instead of adding one."""
+    rid = create_a_report(client)
+    token = make_user_token(client, "changer@example.com")
+    hdr = {"Authorization": f"Bearer {token}"}
+    client.post(f"/api/reports/{rid}/vote", json={"still_there": False}, headers=hdr)
+    res = client.post(f"/api/reports/{rid}/vote", json={"still_there": True}, headers=hdr)
+    body = res.get_json()
+    assert body["total_votes"] == 1        # not 2
+    assert body["votes_gone"] == 0
+    assert body["votes_still_here"] == 1

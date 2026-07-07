@@ -63,6 +63,21 @@
     .status.ok  { color: #2e7d32; }
     .status.err { color: #c62828; }
 
+    /* Vote buttons inside a map popup: small and inline, not full-width. */
+    .votebtns { margin-top: 6px; font-size: 12px; color: #555; }
+    .leaflet-popup-content button {
+      width: auto;
+      display: inline-block;
+      margin: 4px 6px 0 0;
+      padding: 3px 10px;
+      font-size: 12px;
+      border-radius: 5px;
+    }
+    button.vote-yes { background: #2e7d32; }   /* green = still here */
+    button.vote-yes:hover { background: #256628; }
+    button.vote-no  { background: #757575; }   /* grey = gone */
+    button.vote-no:hover  { background: #616161; }
+
     /* Legend for marker colours */
     #legend { font-size: 12px; color: #444; margin-top: 6px; }
     .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 3px; }
@@ -192,6 +207,16 @@
     // --- Small helpers ----------------------------------------------------------
     const $ = (id) => document.getElementById(id);
 
+    // Escape user-supplied text before inserting it into popup/banner HTML.
+    // Without this, a report titled `<img src=x onerror=alert(1)>` would run
+    // as script for everyone who opens the popup (stored XSS). Defence in depth:
+    // the server also caps field lengths.
+    function esc(s) {
+      return String(s ?? "").replace(/[&<>"']/g, (c) => (
+        { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+      ));
+    }
+
     function showStatus(el, msg, isError) {
       el.textContent = msg;
       el.className = "status " + (isError ? "err" : "ok");
@@ -214,18 +239,30 @@
 
     const markersById = {};   // report id -> Leaflet marker, so we can highlight later
 
-    function addReportMarker(report) {
+    // Build the popup HTML for a report, including its crowd-verification
+    // vote tally and the two voting buttons.
+    function popupHtml(report) {
       const when = new Date(report.created_at + "Z").toLocaleString();
+      return (
+        `<b>${esc(report.title)}</b> <small>[${esc(report.category)} / ${esc(report.severity)}]</small><br>` +
+        `${esc(report.description)}<br>` +
+        `<small>by ${esc(report.reporter)} at ${esc(when)}</small><br>` +
+        `<small id="tally-${report.id}">` +
+        `&#10004; ${report.votes_still_here} still here &middot; ` +
+        `&#10008; ${report.votes_gone} gone</small>` +
+        `<div class="votebtns">Is this still happening?<br>` +
+        `<button class="vote-yes" onclick="voteOn(${report.id}, true)">Still here</button>` +
+        `<button class="vote-no" onclick="voteOn(${report.id}, false)">Gone</button></div>`
+      );
+    }
+
+    function addReportMarker(report) {
       const marker = L.circleMarker([report.lat, report.lng], {
         ...DEFAULT_STYLE,
         fillColor: SEVERITY_COLOURS[report.severity] || "#666",
       })
         .addTo(map)
-        .bindPopup(
-          `<b>${report.title}</b> <small>[${report.category} / ${report.severity}]</small><br>` +
-          `${report.description}<br>` +
-          `<small>by ${report.reporter} at ${when}</small>`
-        );
+        .bindPopup(popupHtml(report));
       markersById[report.id] = marker;
     }
 
@@ -375,7 +412,7 @@
       $("bannerTitle").textContent =
         `${data.count} incident(s) within ${data.radius_km} km`;
       $("bannerList").innerHTML = data.reports
-        .map((r) => `<li>${r.title} - ${r.distance_km} km (${r.severity})</li>`)
+        .map((r) => `<li>${esc(r.title)} - ${r.distance_km} km (${esc(r.severity)})</li>`)
         .join("");
       $("banner").hidden = false;
 
@@ -387,6 +424,34 @@
       resetHighlights();
     });
 
+    // --- Crowd verification (voting) ---------------------------------------------
+    // Called from the two buttons inside a marker popup. Records the vote; if
+    // the server auto-removed the report (majority said "gone"), drop its
+    // marker; otherwise refresh the tally shown in the open popup.
+    async function voteOn(reportId, stillThere) {
+      if (!token) { alert("Log in (or register) to vote."); return; }
+      const { status, data } = await api(`/api/reports/${reportId}/vote`,
+                                         { still_there: stillThere });
+      if (status !== 200) { alert(data.error || "Vote failed."); return; }
+
+      if (data.removed) {
+        if (markersById[reportId]) {
+          map.removeLayer(markersById[reportId]);
+          delete markersById[reportId];
+        }
+        map.closePopup();
+        return;
+      }
+      const tallyEl = document.getElementById(`tally-${reportId}`);
+      if (tallyEl) {
+        tallyEl.innerHTML =
+          `&#10004; ${data.votes_still_here} still here &middot; ` +
+          `&#10008; ${data.votes_gone} gone ` +
+          `<i>(needs ${data.votes_needed_to_resolve}+ votes &amp; a "gone" majority to remove)</i>`;
+      }
+    }
+    window.voteOn = voteOn;   // popup buttons use an inline onclick, so expose it globally
+
     // --- Live updates -------------------------------------------------------------
     // Poll for new reports every 30 s so everyone's map stays in sync. Plain
     // polling (not WebSockets) keeps the server completely stateless - and at
@@ -394,8 +459,16 @@
     setInterval(async () => {
       try {
         const reports = await (await fetch("/api/reports")).json();
-        // Only draw markers we haven't seen; existing ones are left untouched.
+        const liveIds = new Set(reports.map((r) => r.id));
+        // Draw markers we haven't seen yet.
         reports.forEach((r) => { if (!markersById[r.id]) addReportMarker(r); });
+        // Remove markers whose report is gone (e.g. voted away by others).
+        Object.keys(markersById).forEach((id) => {
+          if (!liveIds.has(Number(id))) {
+            map.removeLayer(markersById[id]);
+            delete markersById[id];
+          }
+        });
       } catch {
         /* transient network error - just try again in 30 s */
       }

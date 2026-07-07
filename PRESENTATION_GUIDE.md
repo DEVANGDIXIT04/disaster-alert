@@ -31,14 +31,23 @@ plan at the bottom). Have 2-3 reports already submitted so the map isn't empty.
    Python; we deliberately avoided PostGIS to stay portable between SQLite
    and PostgreSQL."*
 
-5. **(60 s) The cloud story.** Flip to slides/terminal:
+5. **(45 s) Crowd verification.** Click a marker → the popup shows a vote tally
+   and **"Still here"/"Gone"** buttons. Click *Gone* and show the tally update
+   live — *"one vote per user; when at least 3 people vote and a majority say
+   it's gone, the report auto-deletes and disappears from everyone's map on the
+   next refresh. The minimum-vote rule stops a single person censoring a real
+   incident."* (To show the actual removal live, either have three throwaway
+   accounts ready, or set `VOTES_TO_RESOLVE = 1` in `app.py` for the demo; the
+   `pytest -k vote` tests also prove the removal.)
+
+6. **(60 s) The cloud story.** Flip to slides/terminal:
    - `Procfile` + `eb status` → Elastic Beanstalk runs gunicorn for us.
    - `aws lambda invoke ... response.json` (from `serverless/README.md`) →
      show the returned `alerted_users` JSON.
    - `docker-compose.yml` → same image runs locally against real PostgreSQL;
      on AWS, `DATABASE_URL` points at RDS instead — zero code change.
 
-6. **(30 s) Wrap.** Concept table from the README; future scope (SNS SMS, S3
+7. **(30 s) Wrap.** Concept table from the README; future scope (SNS SMS, S3
    images, WebSockets).
 
 ## What to say per concept (one breath each)
@@ -99,6 +108,22 @@ once there's more than one instance.
 **Q: Is storing the JWT in a JS variable safe?**
 A: Safer than localStorage (no persistence for XSS to steal later), at the
 cost of logging in again per tab. For this scale, a reasonable trade.
+
+**Q: What stops someone deleting a genuine report through voting?**
+A: Two guards: one vote per user (a database UniqueConstraint — re-voting
+updates the existing row), and a minimum of 3 votes before auto-removal can
+trigger at all, plus a strict >50% "gone" majority. A single actor can't
+remove anything on their own.
+
+**Q: You insert report titles into the map popup — isn't that an XSS risk?**
+A: It would be, so every user-supplied field is HTML-escaped in the browser
+(`esc()`) before it touches `innerHTML`, and the server also caps field
+lengths. A title like `<img onerror=…>` renders as literal text.
+
+**Q: How do votes stay consistent if two people vote at once?**
+A: The votes table is the single source of truth; after every vote we recount
+from it rather than trusting a cached counter, and the UniqueConstraint is
+enforced by the database, not just the app.
 
 ## Fallback plan if the live AWS demo fails
 

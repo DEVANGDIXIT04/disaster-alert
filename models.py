@@ -56,9 +56,17 @@ class Report(db.Model):
     # Who reported it. Nullable so old/anonymous rows don't break anything.
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
     user = db.relationship("User")  # lets us do report.user.name for the popup
+    # Crowd verification votes. cascade="all, delete-orphan" means: when a
+    # report is deleted (e.g. voted "gone"), its votes are deleted too, so no
+    # orphan rows are left pointing at a missing report.
+    votes = db.relationship("Vote", backref="report",
+                            cascade="all, delete-orphan")
 
     def to_dict(self):
         """Convert this row into a plain dict so Flask can return it as JSON."""
+        # Tally the crowd-verification votes so the map popup can show them.
+        still_here = sum(1 for v in self.votes if v.still_there)
+        gone = sum(1 for v in self.votes if not v.still_there)
         return {
             "id": self.id,
             "title": self.title,
@@ -70,4 +78,28 @@ class Report(db.Model):
             # isoformat() -> "2026-07-06T10:30:00" (a standard, JS-parseable string)
             "created_at": self.created_at.isoformat(),
             "reporter": self.user.name if self.user else "anonymous",
+            "votes_still_here": still_here,
+            "votes_gone": gone,
         }
+
+
+class Vote(db.Model):
+    """One user's verification vote on whether an incident is still happening.
+
+    still_there = True  -> "I can confirm this is still here"
+    still_there = False -> "this incident is over / not there anymore"
+
+    The UniqueConstraint guarantees one vote per user per report: voting again
+    updates the existing row instead of stuffing the ballot box.
+    """
+
+    id = db.Column(db.Integer, primary_key=True)
+    report_id = db.Column(db.Integer, db.ForeignKey("report.id"), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    still_there = db.Column(db.Boolean, nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        db.UniqueConstraint("report_id", "user_id", name="uq_one_vote_per_user_per_report"),
+    )

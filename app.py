@@ -25,7 +25,7 @@ from flask import Flask, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from auth import create_token, token_required
-from models import db, Report, User, CATEGORIES, SEVERITIES
+from models import db, Report, User, Vote, CATEGORIES, SEVERITIES
 # The notification logic lives in serverless/notify_lambda.py so the exact
 # same file can be zipped and deployed as an AWS Lambda function. Importing
 # it here is the "local path"; Lambda is the "cloud path".
@@ -39,6 +39,12 @@ ALERT_RADIUS_KM = 10
 # instead of calling the imported Python function. Same logic either way -
 # this just proves the serverless path is genuinely used in production.
 NOTIFY_LAMBDA = os.environ.get("NOTIFY_LAMBDA")
+
+# Crowd-verification: a report is auto-removed once it has at least this many
+# votes AND a strict majority (>50%) of them say the incident is gone. The
+# minimum stops a single person from deleting a genuine report on their own.
+# (Lower it to 1 if you want to demo the removal with a single click.)
+VOTES_TO_RESOLVE = 3
 
 # --- App and database setup -------------------------------------------------
 
@@ -323,6 +329,56 @@ def nearby_reports():
     nearby.sort(key=lambda r: r["distance_km"])  # closest first
 
     return jsonify({"count": len(nearby), "radius_km": radius_km, "reports": nearby})
+
+
+@app.route("/api/reports/<int:report_id>/vote", methods=["POST"])
+@token_required  # you must be logged in to vote
+def vote_on_report(current_user, report_id):
+    """Crowd-verify an incident: body {still_there: true|false}.
+
+    Records this user's vote (one per user - voting again updates it). If the
+    report then has enough votes and a majority say it's gone, it is removed.
+    Returns the current tally and whether the report was removed.
+    """
+    data = request.get_json(silent=True) or {}
+    still_there = data.get("still_there")
+    if not isinstance(still_there, bool):
+        return jsonify({"error": "still_there must be true or false"}), 400
+
+    report = db.session.get(Report, report_id)
+    if report is None:
+        return jsonify({"error": "report not found"}), 404
+
+    # Upsert: one vote per user per report (see the UniqueConstraint in models).
+    vote = Vote.query.filter_by(report_id=report_id, user_id=current_user.id).first()
+    if vote is None:
+        db.session.add(Vote(report_id=report_id, user_id=current_user.id,
+                            still_there=still_there))
+    else:
+        vote.still_there = still_there  # user changed their mind
+    db.session.commit()
+
+    # Recount from scratch - the source of truth is the votes table.
+    votes = Vote.query.filter_by(report_id=report_id).all()
+    total = len(votes)
+    gone = sum(1 for v in votes if not v.still_there)
+    still = total - gone
+
+    # Auto-resolve: enough votes AND a strict majority say it's gone.
+    removed = False
+    if total >= VOTES_TO_RESOLVE and gone > total / 2:
+        db.session.delete(report)   # cascade also deletes this report's votes
+        db.session.commit()
+        removed = True
+
+    return jsonify({
+        "report_id": report_id,
+        "votes_still_here": still,
+        "votes_gone": gone,
+        "total_votes": total,
+        "votes_needed_to_resolve": VOTES_TO_RESOLVE,
+        "removed": removed,
+    })
 
 
 # --- Entry point ------------------------------------------------------------
